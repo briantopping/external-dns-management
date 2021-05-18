@@ -39,6 +39,7 @@ import (
 	_ "github.com/gardener/external-dns-management/pkg/controller/provider/infoblox"
 	_ "github.com/gardener/external-dns-management/pkg/controller/provider/netlify"
 	_ "github.com/gardener/external-dns-management/pkg/controller/provider/openstack"
+	_ "github.com/gardener/external-dns-management/pkg/controller/provider/rfc2136"
 
 	_ "github.com/gardener/external-dns-management/pkg/controller/annotation/annotations"
 
