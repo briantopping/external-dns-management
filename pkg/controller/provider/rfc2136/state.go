@@ -18,28 +18,27 @@ package rfc2136
 
 import (
 	godns "github.com/miekg/dns"
+	"strings"
 	"unsafe"
 
 	"github.com/gardener/external-dns-management/pkg/dns/provider/raw"
 )
 
 type Record struct {
-	RR godns.RR
+	godns.RR
 	Name string
-	Id string
+	Id   string
 }
 
-//var _ raw.Record = &Record{}
-
+var _ raw.Record = &Record{}
 
 func (r *Record) GetType() string    { return godns.TypeToString[r.Header().Rrtype] }
 func (r *Record) GetId() string      { return r.Id } //r.Header() }
 func (r *Record) GetDNSName() string { return r.Name }
 func (r *Record) GetValue() string {
 	if r.Header().Rrtype == godns.TypeTXT {
-		//t := *(*godns.TXT)(unsafe.Pointer(r))
-		t := r.RR(*godns.TXT)
-		return raw.EnsureQuotedText(t.Txt[0])
+		t := *(*godns.TXT)(unsafe.Pointer(r))
+		return raw.EnsureQuotedText(strings.Join(t.Txt, ","))
 	}
 	return r.String()
 }

@@ -19,8 +19,8 @@ package rfc2136
 import (
 	"fmt"
 	"github.com/cloudflare/cloudflare-go"
-	dns2 "github.com/gardener/external-dns-management/pkg/dns"
-	"github.com/miekg/dns"
+	"github.com/gardener/external-dns-management/pkg/dns"
+	godns "github.com/miekg/dns"
 	"k8s.io/client-go/util/flowcontrol"
 	"net"
 	"strings"
@@ -31,8 +31,8 @@ import (
 )
 
 type Access interface {
-	ListZones(consume func(zone *dns.NS) (bool, error)) error
-	ListRecords(zoneId string, consume func(record *dns.Envelope) (bool, error)) error
+	ListZones(consume func(zone *godns.SOA) (bool, error)) error
+	ListRecords(zoneId string, consume func(record *godns.Envelope) (bool, error)) error
 
 	raw.Executor
 }
@@ -47,14 +47,14 @@ func NewAccess(rfc2136Config Rfc2136Config, metrics provider.Metrics, rateLimite
 	return &access{rfc2136Config: rfc2136Config, metrics: metrics, rateLimiter: rateLimiter}, nil
 }
 
-func (this *access) ListZones(consume func(zone *dns.NS) (bool, error)) error {
+func (this *access) ListZones(consume func(zone *godns.SOA) (bool, error)) error {
 	this.metrics.AddGenericRequests(provider.M_LISTZONES, 1)
 	this.rateLimiter.Accept()
 	for _, zone := range this.rfc2136Config.zones {
-		c := new(dns.Client)
+		c := new(godns.Client)
 		c.TsigSecret = map[string]string{this.rfc2136Config.tsigKeyName: this.rfc2136Config.tsigSecret}
-		m := new(dns.Msg)
-		m.SetQuestion(zone, dns.TypeNS)
+		m := new(godns.Msg)
+		m.SetQuestion(zone, godns.TypeSOA)
 		m.RecursionDesired = false
 
 		m.SetTsig(this.rfc2136Config.tsigKeyName, this.rfc2136Config.tsigAlgorithm, 300, time.Now().Unix())
@@ -62,13 +62,13 @@ func (this *access) ListZones(consume func(zone *dns.NS) (bool, error)) error {
 		if err != nil {
 			return err
 		}
-		if r.Rcode != dns.RcodeSuccess {
+		if r.Rcode != godns.RcodeSuccess {
 			continue
 		}
 
 		targetNs := strings.Split(this.rfc2136Config.nameserver, ":")
 		for _, a := range r.Answer {
-			if ns, ok := a.(*dns.NS); ok {
+			if ns, ok := a.(*godns.SOA); ok {
 				if ns.Ns == targetNs[0] {
 					if cont, err := consume(ns); !cont || err != nil {
 						return err
@@ -81,12 +81,12 @@ func (this *access) ListZones(consume func(zone *dns.NS) (bool, error)) error {
 	return nil
 }
 
-func (this *access) ListRecords(zoneId string, consume func(record *dns.Envelope) (bool, error)) error {
+func (this *access) ListRecords(zoneId string, consume func(record *godns.Envelope) (bool, error)) error {
 	this.metrics.AddZoneRequests(zoneId, provider.M_LISTRECORDS, 1)
 	this.rateLimiter.Accept()
-	tr := new(dns.Transfer)
+	tr := new(godns.Transfer)
 	tr.TsigSecret = map[string]string{this.rfc2136Config.tsigKeyName: this.rfc2136Config.tsigSecret}
-	m := new(dns.Msg)
+	m := new(godns.Msg)
 	m.SetAxfr(zoneId)
 	m.SetTsig(this.rfc2136Config.tsigKeyName, this.rfc2136Config.tsigAlgorithm, 300, time.Now().Unix())
 
@@ -95,11 +95,11 @@ func (this *access) ListRecords(zoneId string, consume func(record *dns.Envelope
 		return err
 	}
 
-	for msg := range c {
-		if msg.Error != nil {
-			return msg.Error
+	for envelope := range c {
+		if envelope.Error != nil {
+			return envelope.Error
 		}
-		if cont, err := consume(msg); !cont || err != nil {
+		if cont, err := consume(envelope); !cont || err != nil {
 			return err
 		}
 	}
@@ -107,38 +107,38 @@ func (this *access) ListRecords(zoneId string, consume func(record *dns.Envelope
 }
 
 func (this *access) CreateRecord(r raw.Record, zone provider.DNSHostedZone) error {
-	m := new(dns.Msg)
+	m := new(godns.Msg)
 	m.SetUpdate(zone.Domain())
 	switch r.GetType() {
-	case dns2.RS_A:
-		rr := new(dns.A)
-		rr.Hdr = dns.RR_Header{Name: r.GetDNSName(), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: uint32(r.GetTTL())}
+	case dns.RS_A:
+		rr := new(godns.A)
+		rr.Hdr = godns.RR_Header{Name: r.GetDNSName(), Rrtype: godns.TypeA, Class: godns.ClassINET, Ttl: uint32(r.GetTTL())}
 		rr.A = net.ParseIP(r.GetValue())
-		rrs := []dns.RR{rr}
+		rrs := []godns.RR{rr}
 		m.Insert(rrs)
-	case dns2.RS_CNAME:
-		rr := new(dns.CNAME)
-		rr.Hdr = dns.RR_Header{Name: r.GetDNSName(), Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: uint32(r.GetTTL())}
+	case dns.RS_CNAME:
+		rr := new(godns.CNAME)
+		rr.Hdr = godns.RR_Header{Name: r.GetDNSName(), Rrtype: godns.TypeCNAME, Class: godns.ClassINET, Ttl: uint32(r.GetTTL())}
 		rr.Target = r.GetValue()
-	case dns2.RS_TXT:
-		rr := new(dns.TXT)
-		rr.Hdr = dns.RR_Header{Name: r.GetDNSName(), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: uint32(r.GetTTL())}
+	case dns.RS_TXT:
+		rr := new(godns.TXT)
+		rr.Hdr = godns.RR_Header{Name: r.GetDNSName(), Rrtype: godns.TypeTXT, Class: godns.ClassINET, Ttl: uint32(r.GetTTL())}
 		rr.Txt = []string{r.GetValue()}
-	case dns2.RS_NS:
-		rr := new(dns.NS)
-		rr.Hdr = dns.RR_Header{Name: r.GetDNSName(), Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: uint32(r.GetTTL())}
+	case dns.RS_NS:
+		rr := new(godns.NS)
+		rr.Hdr = godns.RR_Header{Name: r.GetDNSName(), Rrtype: godns.TypeNS, Class: godns.ClassINET, Ttl: uint32(r.GetTTL())}
 		rr.Ns = r.GetValue()
 	default:
 		return fmt.Errorf("Cannot create unrecognized record type", r.GetType())
 	}
-	c := new(dns.Client)
+	c := new(godns.Client)
 	c.SingleInflight = true
 	c.TsigSecret = map[string]string{this.rfc2136Config.tsigKeyName: this.rfc2136Config.tsigSecret}
 	reply, _, err := c.Exchange(m, this.rfc2136Config.nameserver)
 	if err != nil {
 		return err
 	}
-	if reply != nil && reply.Rcode != dns.RcodeSuccess {
+	if reply != nil && reply.Rcode != godns.RcodeSuccess {
 		return fmt.Errorf("Failure creating DNS record: ", reply.Rcode)
 	}
 	return nil
@@ -170,14 +170,14 @@ func (this *access) DeleteRecord(r raw.Record, zone provider.DNSHostedZone) erro
 }
 
 func (this *access) NewRecord(fqdn, rtype, value string, zone provider.DNSHostedZone, ttl int64) raw.Record {
-	result := dns.
-	return (*Record)(&dns.{
-		Type:    rtype,
-		Name:    fqdn,
-		Content: value,
-		TTL:     int(ttl),
-		ZoneID:  zone.Id(),
-	})
+	//return (*Record)(&godns.{
+	//	Type:    rtype,
+	//	Name:    fqdn,
+	//	Content: value,
+	//	TTL:     int(ttl),
+	//	ZoneID:  zone.Id(),
+	//})
+	return &Record{&godns.RR_Header{Name: fqdn, Rrtype: rtype, Class: godns.ClassINET, Ttl: uint32(ttl)}, "", ""}
 }
 
 func testTTL(ttl *int) {

@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gardener/external-dns-management/pkg/dns/provider/raw"
-	"github.com/miekg/dns"
+	godns "github.com/miekg/dns"
 	"strings"
 
 	"github.com/gardener/controller-manager-library/pkg/logger"
@@ -47,10 +47,10 @@ type Rfc2136Config struct {
 }
 
 var supportedAlgorithms = map[string]string{
-	"HMACMD5":    dns.HmacMD5,
-	"HMACSHA1":   dns.HmacSHA1,
-	"HMACSHA256": dns.HmacSHA256,
-	"HMACSHA512": dns.HmacSHA512,
+	"HMACMD5":    godns.HmacMD5,
+	"HMACSHA1":   godns.HmacSHA1,
+	"HMACSHA256": godns.HmacSHA256,
+	"HMACSHA512": godns.HmacSHA512,
 }
 
 var _ provider.DNSHandler = &Handler{}
@@ -75,7 +75,7 @@ func NewHandler(config *provider.DNSHandlerConfig) (provider.DNSHandler, error) 
 
 	algorithm := h.rfc2136Config.tsigAlgorithm
 	if algorithm == "" {
-		algorithm = dns.HmacMD5
+		algorithm = godns.HmacMD5
 	} else {
 		if value, ok := supportedAlgorithms[strings.ToUpper(algorithm)]; ok {
 			algorithm = value
@@ -112,13 +112,12 @@ func (h *Handler) GetZones() (provider.DNSHostedZones, error) {
 
 // GetZones for cache miss
 func (h *Handler) getZones(cache provider.ZoneCache) (provider.DNSHostedZones, error) {
-	rawZones := []dns.Envelope{}
+	rawZones := []godns.SOA{}
 	{
-		f := func(zone dns.Envelope) (bool, error) {
-			rawZones = append(rawZones, zone)
+		err := h.access.ListZones(func(zone *godns.SOA) (bool, error) {
+			rawZones = append(rawZones, *zone)
 			return true, nil
-		}
-		err := h.access.ListZones(f)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -127,28 +126,40 @@ func (h *Handler) getZones(cache provider.ZoneCache) (provider.DNSHostedZones, e
 	zones := provider.DNSHostedZones{}
 
 	for _, z := range rawZones {
-		forwarded := []string{}
-		f := func(r cloudflare.DNSRecord) (bool, error) {
-			if r.Type == dns.RS_NS {
-				name := r.Name
-				if name != z.Name {
-					forwarded = append(forwarded, name)
+		var forwarded []string
+		f := func(r *godns.Envelope) (bool, error) {
+			var soa godns.SOA
+			for _, rr := range r.RR {
+				if rr.Header().Rrtype == godns.TypeSOA {
+					soa = *rr.(*godns.SOA)
+					break
+				}
+			}
+
+			nameserver := strings.Split(":", h.rfc2136Config.nameserver)[0]
+			if nameserver != soa.Ns {
+				logger.Warnf("SOA %q for zone %q does not match configured server %q", soa.Ns, soa.Header().Name, nameserver)
+			}
+			for _, rr := range r.RR {
+				if rr.Header().Rrtype == godns.TypeNS {
+					ns := rr.(*godns.NS)
+					// record zones that this server has control over.
+					if ns.Ns == soa.Ns {
+						forwarded = append(forwarded, ns.Ns)
+					} else {
+						logger.Warnf("Not managing forwarded zone %q because it does not match the zone SOA of %q", ns.Ns, soa.Ns)
+					}
 				}
 			}
 			return true, nil
 		}
-		err := h.access.ListRecords(z.ID, f)
+		err := h.access.ListRecords(z.Header().Name, f)
 		if err != nil {
-			if strings.Contains(err.Error(), "403") {
-				// It is possible to deny access to certain zones in the account
-				// As a result, z zone should not be appended to the hosted zones
-				continue
-			} else {
-				return nil, err
-			}
+			return nil, err
 		}
 
-		hostedZone := provider.NewDNSHostedZone(h.ProviderType(), z.ID, z.Name, z.ID, forwarded, false)
+		// TODO fix the identifiers for the new zone
+		hostedZone := provider.NewDNSHostedZone(h.ProviderType(), z.Header().Name, z.Header().Name, z.Header().Name, forwarded, false)
 		zones = append(zones, hostedZone)
 	}
 
@@ -164,9 +175,10 @@ func (h *Handler) GetZoneState(zone provider.DNSHostedZone) (provider.DNSZoneSta
 func (h *Handler) getZoneState(zone provider.DNSHostedZone, cache provider.ZoneCache) (provider.DNSZoneState, error) {
 	state := raw.NewState()
 
-	f := func(r cloudflare.DNSRecord) (bool, error) {
-		a := (*Record)(&r)
-		state.AddRecord(a)
+	f := func(envelope *godns.Envelope) (bool, error) {
+		for _, rr := range envelope.RR {
+			state.AddRecord(rr.(*Record))
+		}
 		return true, nil
 	}
 	err := h.access.ListRecords(zone.Key(), f)
